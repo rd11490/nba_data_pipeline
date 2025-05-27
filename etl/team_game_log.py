@@ -1,8 +1,7 @@
 import argparse
-import pandas as pd
 from api.smart import smart
 from database.db_client import PostgresClient
-from utils.utils import add_id, add_season_and_type
+from utils.utils import add_id, add_season_and_type, fill_nulls
 from database.creds import creds
 from utils.arg_parser import season_arg, season_type_arg
 
@@ -38,11 +37,7 @@ def main():
         df = add_season_and_type(df, season, season_type)
         df = add_id(df, [Columns.GAME_ID, Columns.TEAM_ID])
         # Fill NaN/nulls
-        for col in df.columns:
-            if pd.api.types.is_numeric_dtype(df[col]):
-                df[col] = df[col].fillna(0.0)
-            else:
-                df[col] = df[col].where(df[col].notnull(), None)
+        df = fill_nulls(df)
         # Write to DB
         print(df)
         client.write(df, Tables.TEAM_GAME_LOG)

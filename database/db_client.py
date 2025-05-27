@@ -66,19 +66,24 @@ class PostgresClient:
             # This requires manual insert using SQLAlchemy Table object
             metadata = MetaData()
             table = Table(table_name, metadata, autoload_with=self.engine)
+            records = []
+            for idx, row in df.iterrows():
+                data = row.to_dict()
+                data['id'] = idx  # Ensure the index is included as 'id'
+                records.append(data)
+
             with self.engine.begin() as conn:
-                for _, row in df.iterrows():
-                    data = row.to_dict()
-                    data['id'] = row.name
-                    stmt = insert(table).values(**data)
-                    if on_conflict == 'replace':
-                        stmt = stmt.on_conflict_do_update(
-                            index_elements=['id'],
-                            set_={k: stmt.excluded[k] for k in data.keys()}
-                        )
-                    elif on_conflict == 'ignore':
-                        stmt = stmt.on_conflict_do_nothing(index_elements=[])
-                    conn.execute(stmt)
+                stmt = insert(table)
+                if on_conflict == 'replace':
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=['id'],
+                        set_={k: stmt.excluded[k] for k in df.columns}
+                    )
+                elif on_conflict == 'ignore':
+                    stmt = stmt.on_conflict_do_nothing(index_elements=['id'])
+
+                with self.engine.begin() as conn:
+                    conn.execute(stmt, records)
             print(f"Table '{table_name}' written from DataFrame with on_conflict='{on_conflict}'.")
 
     def create_table_from_dataframe(self, table_name: str, df, if_exists='append', index=True):

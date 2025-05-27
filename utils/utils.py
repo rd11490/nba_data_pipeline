@@ -1,3 +1,14 @@
+def fill_nulls(df):
+    """
+    Fill NaN/nulls in a DataFrame: numeric columns get 0.0, others get None.
+    """
+    import pandas as pd
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col]):
+            df[col] = df[col].fillna(0.0)
+        else:
+            df[col] = df[col].where(df[col].notnull(), None)
+    return df
 import time
 
 from api.smart import SeasonType

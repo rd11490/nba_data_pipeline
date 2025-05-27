@@ -1,6 +1,4 @@
 import datetime
-import random
-from time import sleep
 
 import pandas as pd
 import requests
