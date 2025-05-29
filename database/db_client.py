@@ -4,6 +4,8 @@ import pandas as pd
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy import MetaData, Table
 
+from database.creds import creds
+
 
 class PostgresClient:
 
@@ -134,3 +136,10 @@ class PostgresClient:
         self.engine.dispose()
 
     
+database_client = PostgresClient(
+        dbname=creds.dbname,
+        user=creds.user,
+        password=creds.password,
+        host=creds.host,
+        port=creds.port
+    )

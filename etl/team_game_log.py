@@ -1,8 +1,7 @@
 import argparse
 from api.smart import smart
-from database.db_client import PostgresClient
+from database.db_client import database_client
 from utils.utils import add_id, add_season_and_type, fill_nulls
-from database.creds import creds
 from utils.arg_parser import season_arg, season_type_arg
 
 from database.db_constants import Tables, Columns
@@ -18,15 +17,6 @@ def main():
     seasons = [s.strip() for s in args.season.split(',') if s.strip()]
     season_type = args.season_type
 
-    # Connect to DB
-    client = PostgresClient(
-        dbname=creds.dbname,
-        user=creds.user,
-        password=creds.password,
-        host=creds.host,
-        port=creds.port
-    )
-
     for season in seasons:
         print(f"Processing season {season} ({season_type})...")
         df = smart.get_teams_game_log(season_type=season_type, season=season)
@@ -40,9 +30,9 @@ def main():
         df = fill_nulls(df)
         # Write to DB
         print(df)
-        client.write(df, Tables.TEAM_GAME_LOG)
+        database_client.write(df, Tables.TEAM_GAME_LOG)
         print(f"Written {len(df)} rows for {season} {season_type}.")
-    client.close()
+    database_client.close()
 
 if __name__ == '__main__':
     main()

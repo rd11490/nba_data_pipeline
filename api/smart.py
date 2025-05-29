@@ -125,6 +125,13 @@ class Smart:
             year = datetime.datetime.now().year
             last_year = year - 1
             return str(last_year) + '-' + str(year)[2:]
+        
+    def game_rotation(self, game_id, league_id='00'):
+        params = (
+            ('GameID', game_id),
+            ('LeagueID', league_id),
+        )
+        return self.api_call('gamerotation', params=params)
 
     def team_season_totals(self, per_mode=PerMode.Default, season=None, season_type=SeasonType.Default,
                            measure_type=MeasureType.Default):
@@ -542,7 +549,7 @@ class Smart:
         return self.api_call_with_retry(endpoint, params, headers, timeout, retries)
 
     def api_call_with_retry(self, endpoint, params, headers=None, timeout=10, retries_left=10):
-        print('Calling: "{}{} - {}" -- retries remaining: {}'.format(self.base_url, endpoint, params, retries_left))
+        # print('Calling: "{}{} - {}" -- retries remaining: {}'.format(self.base_url, endpoint, params, retries_left))
         if retries_left > 0:
             try:
                 if headers is None:

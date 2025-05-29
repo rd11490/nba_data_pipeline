@@ -1,11 +1,14 @@
 import argparse
 import pandas as pd
 from api.smart import smart
-from database.db_client import PostgresClient
+from database.db_client import database_client
 from database.db_constants import Tables, Columns
-from database.creds import creds
 from utils.arg_parser import season_arg, season_type_arg, game_id_arg, delta_arg
 from utils.utils import add_season_and_type, add_id, fill_nulls,extract_season_from_game_id, extract_season_type_from_game_id
+
+"""
+NOTE: This script turned out to be unnecessary. A rotations api exists that provides the players on court at the start of each period.
+"""
 
 # --- Helper Functions ---
 def convert_time_to_seconds(period, time_str):
@@ -28,12 +31,10 @@ def get_period_time_bounds(period):
         period_end = period_start + 5 * 60 
     return period_start * 10, period_end * 10  # Convert to tenths of seconds
 
-def fetch_play_by_play(game_id, db=None):
+def fetch_play_by_play(game_id):
     # Read play-by-play from the database, not the API
-    if db is None:
-        raise ValueError("Database client must be provided to fetch play-by-play from DB.")
     query = f'SELECT * FROM {Tables.PLAY_BY_PLAY} WHERE "{Columns.GAME_ID}" = :game_id'
-    df = db.read(query, params={"game_id": game_id})
+    df = database_client.read(query, params={"game_id": game_id})
     if df is None or df.empty:
         raise Exception(f"No play-by-play data found in DB for game_id {game_id}")
     return fill_nulls(df)
@@ -59,10 +60,14 @@ def fetch_box_score(game_id, period):
 def extract_subs(pbp):
     subs = pbp[pbp[Columns.EVENTMSGTYPE] == 8].copy()
     subs[Columns.PERIOD] = subs[Columns.PERIOD].astype(int)
-    subs[Columns.SECONDS_FROM_START] = subs.apply(
-        lambda row: convert_time_to_seconds(row[Columns.PERIOD], row[Columns.PCTIMESTRING]), axis=1)
-    # Sort by SECONDS_FROM_START ascending, then EVENTNUM ascending
-    subs = subs.sort_values([Columns.SECONDS_FROM_START, Columns.EVENTNUM], ascending=[True, True])
+    if not subs.empty:
+        subs[Columns.SECONDS_FROM_START] = subs.apply(
+            lambda row: convert_time_to_seconds(row[Columns.PERIOD], row[Columns.PCTIMESTRING]), axis=1)
+        # Sort by SECONDS_FROM_START ascending, then EVENTNUM ascending
+        subs = subs.sort_values([Columns.SECONDS_FROM_START, Columns.EVENTNUM], ascending=[True, True])
+    else:
+        # Ensure SECONDS_FROM_START column exists even if empty
+        subs[Columns.SECONDS_FROM_START] = []
     return subs
 
 def get_starters_for_period(subs, box, period):
@@ -82,17 +87,16 @@ def get_starters_for_period(subs, box, period):
             # If first event is sub IN, not a starter
     return starters
 
-def process_game(game_id, season, season_type, db):
-    pbp = fetch_play_by_play(game_id, db=db)
+def process_game(game_id, season, season_type):
+    pbp = fetch_play_by_play(game_id)
     periods = sorted(pbp[Columns.PERIOD].unique())
     records = []
     for period in periods:
         # Filter pbp and subs for this period only
-        pbp_period = pbp[pbp[Columns.PERIOD] == period]
+        pbp_period = pbp[pbp[Columns.PERIOD] == period].copy()
         subs = extract_subs(pbp_period)
         box = fetch_box_score(game_id, period)
         starters = get_starters_for_period(subs, box, period)
-        print(starters)
         if len(starters) != 10:
             print(f"Game {game_id} period {period}: found {len(starters)} starters, expected 10.")
             raise Exception(f"Game {game_id} period {period}: found {len(starters)} starters, expected 10.")
@@ -107,9 +111,38 @@ def process_game(game_id, season, season_type, db):
                 Columns.TEAM_ID: team_id
             })
     df = pd.DataFrame(records)
-    df = add_season_and_type(df, season, season_type)
-    df = add_id(df, [Columns.GAME_ID, Columns.PERIOD, Columns.PLAYER_ID])
+
     return fill_nulls(df)
+
+def filter_game_ids_delta(game_ids, season, season_type):
+    """
+    Given a list of game_ids, remove those already present in the output table for the given season and season_type.
+    """
+    q_delta = f'SELECT DISTINCT "{Columns.GAME_ID}" FROM {Tables.PLAYERS_ON_COURT_AT_START_OF_PERIOD} WHERE "{Columns.SEASON}" = :season AND "{Columns.SEASON_TYPE}" = :stype'
+    result_delta = database_client.read(q_delta, params={'season': season, 'stype': season_type})
+    if result_delta is not None and not result_delta.empty:
+        existing_game_ids = set(result_delta[Columns.GAME_ID].tolist())
+        before_count = len(game_ids)
+        filtered_game_ids = [gid for gid in game_ids if gid not in existing_game_ids]
+        after_count = len(filtered_game_ids)
+        print(f"Delta mode: {before_count - after_count} games already exist in {Tables.PLAYERS_ON_COURT_AT_START_OF_PERIOD}, {after_count} remaining to process for season {season}.")
+        return filtered_game_ids
+    else:
+        print(f"Delta mode: No games found in {Tables.PLAYERS_ON_COURT_AT_START_OF_PERIOD} for season {season} and type {season_type}.")
+        return game_ids
+
+def get_game_ids(season, season_type):
+    q = f'SELECT DISTINCT "{Columns.GAME_ID}" FROM {Tables.TEAM_GAME_LOG} WHERE "{Columns.SEASON}" = :season AND "{Columns.SEASON_TYPE}" = :stype'
+    result = database_client.read(q, params={'season': season, 'stype': season_type})
+    game_ids = result[Columns.GAME_ID].tolist()
+    return game_ids
+
+def write_frames(dfs, games_to_process, i, season, season_type):
+    all_df = pd.concat(dfs)
+    all_df = add_season_and_type(all_df, season, season_type)
+    all_df = add_id(all_df, [Columns.GAME_ID, Columns.PERIOD, Columns.PLAYER_ID])
+    database_client.write(all_df, Tables.PLAYERS_ON_COURT_AT_START_OF_PERIOD)
+    print(f"Wrote {i}/{games_to_process} games to {Tables.PLAYERS_ON_COURT_AT_START_OF_PERIOD}")
 
 def main():
     parser = argparse.ArgumentParser(description='Determine players on court at start of each period for NBA games.')
@@ -119,36 +152,52 @@ def main():
     delta_arg(parser)
     args = parser.parse_args()
 
-    db = PostgresClient(
-        dbname=creds.dbname,
-        user=creds.user,
-        password=creds.password,
-        host=creds.host,
-        port=creds.port
-    )
+    # Enforce: only one of (game_id) or (season and season_type) can be provided
+    has_game_id = args.game_id is not None
+    has_season_and_type = args.season is not None and args.season_type is not None
+    if has_game_id and has_season_and_type:
+        raise Exception("You must provide either --game_id or both --season and --season_type, but not both.")
+    if not has_game_id and not has_season_and_type:
+        raise Exception("You must provide either --game_id or both --season and --season_type.")
 
     if args.game_id:
         # Determine season and season_type from game_id if not provided
-        season = args.season or extract_season_from_game_id(args.game_id)
-        season_type = args.season_type or extract_season_type_from_game_id(args.game_id)
-        df = process_game(args.game_id, season, season_type, db)
-        db.write(df, Tables.PLAYERS_ON_COURT_AT_START_OF_PERIOD)
+        seasons_arg = extract_season_from_game_id(args.game_id)
+        season_type = extract_season_type_from_game_id(args.game_id)
+        df = process_game(args.game_id, season, season_type)
+        database_client.write(df, Tables.PLAYERS_ON_COURT_AT_START_OF_PERIOD)
         print(f"Processed game {args.game_id}")
     else:
         seasons = [s.strip() for s in args.season.split(',') if s.strip()]
+        season_type = args.season_type
         for season in seasons:
             # Get all game_ids for this season/type
-            q = f'SELECT DISTINCT "{Columns.GAME_ID}" FROM {Tables.TEAM_GAME_LOG} WHERE "{Columns.SEASON}" = :season AND "{Columns.SEASON_TYPE}" = :stype'
-            result = db.read(q, params={'season': season, 'stype': args.season_type})
-            game_ids = result[Columns.GAME_ID].tolist()
-            for gid in game_ids:
+            game_ids = get_game_ids(season, season_type)
+
+            # If delta, filter out game_ids already in players_on_court_at_start_of_period
+            if getattr(args, 'delta', False):
+                game_ids = filter_game_ids_delta(game_ids, season, season_type)
+
+            dfs = []
+            games_to_process = len(game_ids)
+            for i, gid in enumerate(game_ids, 1):
+                print(f"Processing game {gid}")
+
                 try:
-                    df = process_game(gid, season, args.season_type, db)
-                    db.write(df, Tables.PLAYERS_ON_COURT_AT_START_OF_PERIOD)
+                    df = process_game(gid, season, args.season_type)
+                    dfs.append(df)
                     print(f"Processed game {gid}")
                 except Exception as e:
                     print(f"Failed for game {gid}: {e}")
-    db.close()
+                # Write to DB every 10 games
+                if i%10 == 0:
+                    
+                    write_frames(dfs, games_to_process, i, season, season_type)
+                    dfs = []
+            # Write any remaining games
+            if dfs:
+                write_frames(dfs, games_to_process, i, season, season_type)
+    database_client.close()
 
 if __name__ == '__main__':
     main()
