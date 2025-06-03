@@ -64,7 +64,7 @@ def extract_subs(pbp):
         subs[Columns.SECONDS_FROM_START] = subs.apply(
             lambda row: convert_time_to_seconds(row[Columns.PERIOD], row[Columns.PCTIMESTRING]), axis=1)
         # Sort by SECONDS_FROM_START ascending, then EVENTNUM ascending
-        subs = subs.sort_values([Columns.SECONDS_FROM_START, Columns.EVENTNUM], ascending=[True, True])
+        subs = subs.sort_values([Columns.PERIOD, Columns.SECONDS_FROM_START, Columns.EVENTNUM], ascending=[True,True, True])
     else:
         # Ensure SECONDS_FROM_START column exists even if empty
         subs[Columns.SECONDS_FROM_START] = []
@@ -87,6 +87,41 @@ def get_starters_for_period(subs, box, period):
             # If first event is sub IN, not a starter
     return starters
 
+def get_starters_for_period_pbp(pbp, period):
+    period_pbp = pbp[pbp[Columns.PERIOD] == period]
+    subs = period_pbp[period_pbp[Columns.EVENTMSGTYPE] == 8]
+
+    player_1 = period_pbp[[Columns.PLAYER1_ID, Columns.PLAYER1_TEAM_ID]].rename(
+        columns={Columns.PLAYER1_ID: Columns.PLAYER_ID, Columns.PLAYER1_TEAM_ID: Columns.TEAM_ID}
+    ).drop_duplicates()
+    player_2 = period_pbp[[Columns.PLAYER2_ID, Columns.PLAYER2_TEAM_ID]].rename(
+        columns={Columns.PLAYER2_ID: Columns.PLAYER_ID, Columns.PLAYER2_TEAM_ID: Columns.TEAM_ID}
+    ).drop_duplicates()
+    player_3 = period_pbp[[Columns.PLAYER3_ID, Columns.PLAYER3_TEAM_ID]].rename(
+        columns={Columns.PLAYER3_ID: Columns.PLAYER_ID, Columns.PLAYER3_TEAM_ID: Columns.TEAM_ID}
+    ).drop_duplicates()
+
+    players = pd.concat([player_1, player_2, player_3], ignore_index=True)
+    players = players[players[Columns.TEAM_ID] != 0]
+    players = players.drop_duplicates()
+    players_in_period = list(map(tuple, players[[Columns.PLAYER_ID, Columns.TEAM_ID]].values))
+
+    starters = []
+    for (pid, tid) in players_in_period:
+        player_subs = subs[(subs[Columns.PERIOD] == period) & 
+                           ((subs['PLAYER1_ID'] == pid) | (subs['PLAYER2_ID'] == pid))]
+        if player_subs.empty:
+            # No sub events: must be a starter
+            starters.append((pid, tid))
+        else:
+            first_event = player_subs.iloc[0]
+            if first_event['PLAYER1_ID'] == pid:
+                # First event is sub OUT: started the period
+                starters.append((pid, tid))
+            # If first event is sub IN, not a starter
+    return starters
+
+
 def process_game(game_id, season, season_type):
     pbp = fetch_play_by_play(game_id)
     periods = sorted(pbp[Columns.PERIOD].unique())
@@ -97,19 +132,34 @@ def process_game(game_id, season, season_type):
         subs = extract_subs(pbp_period)
         box = fetch_box_score(game_id, period)
         starters = get_starters_for_period(subs, box, period)
-        if len(starters) != 10:
-            print(f"Game {game_id} period {period}: found {len(starters)} starters, expected 10.")
-            raise Exception(f"Game {game_id} period {period}: found {len(starters)} starters, expected 10.")
-        for pid in starters:
-            team_id = box[box[Columns.PLAYER_ID] == pid][Columns.TEAM_ID].iloc[0]
-            records.append({
-                Columns.GAME_ID: game_id,
-                Columns.SEASON: season,
-                Columns.SEASON_TYPE: season_type,
-                Columns.PERIOD: period,
-                Columns.PLAYER_ID: pid,
-                Columns.TEAM_ID: team_id
-            })
+        if len(starters) == 10:
+            for pid in starters:
+                team_id = box[box[Columns.PLAYER_ID] == pid][Columns.TEAM_ID].iloc[0]
+                records.append({
+                    Columns.GAME_ID: game_id,
+                    Columns.SEASON: season,
+                    Columns.SEASON_TYPE: season_type,
+                    Columns.PERIOD: period,
+                    Columns.PLAYER_ID: pid,
+                    Columns.TEAM_ID: team_id
+                })
+        else:
+            print(f"Game {game_id} period {period}: found {len(starters)} starters, expected 10., Trying using PBP")
+            starters = get_starters_for_period_pbp(pbp_period, period)
+            if len(starters) == 10:
+                for (pid, team_id) in starters:
+                    records.append({
+                        Columns.GAME_ID: game_id,
+                        Columns.SEASON: season,
+                        Columns.SEASON_TYPE: season_type,
+                        Columns.PERIOD: period,
+                        Columns.PLAYER_ID: pid,
+                        Columns.TEAM_ID: team_id
+                    })
+            else:
+                print(f"Game {game_id} period {period}: found {len(starters)} starters using PBP, expected 10. Skipping this period.")
+                raise Exception(f"Game {game_id} period {period}: found {len(starters)} starters, expected 10. Skipping this period.")
+        
     df = pd.DataFrame(records)
 
     return fill_nulls(df)
@@ -162,9 +212,9 @@ def main():
 
     if args.game_id:
         # Determine season and season_type from game_id if not provided
-        seasons_arg = extract_season_from_game_id(args.game_id)
+        season_in = extract_season_from_game_id(args.game_id)
         season_type = extract_season_type_from_game_id(args.game_id)
-        df = process_game(args.game_id, season, season_type)
+        df = process_game(args.game_id, season_in, season_type)
         database_client.write(df, Tables.PLAYERS_ON_COURT_AT_START_OF_PERIOD)
         print(f"Processed game {args.game_id}")
     else:

@@ -3,6 +3,7 @@ from sqlalchemy.exc import ProgrammingError, OperationalError
 import pandas as pd
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy import MetaData, Table
+from database.db_constants import Columns
 
 from database.creds import creds
 
@@ -47,6 +48,7 @@ class PostgresClient:
             df.to_sql(table_name, self.engine, if_exists='fail', index=index, index_label='id')
             self.set_table_columns_not_null(table_name)
             self.set_primary_key_id(table_name)
+            self.add_standard_indexes(table_name, df)
 
             print(f"Table '{table_name}' did not exist and was created from DataFrame.")
             return
@@ -55,6 +57,7 @@ class PostgresClient:
             # Use default pandas to_sql behavior
             try:
                 df.to_sql(table_name, self.engine, if_exists=if_exists, index=index)
+                # Add indexes for GAME_ID, SEASON, SEASON_TYPE if present
                 print(f"Table '{table_name}' written from DataFrame.")
             except ValueError as e:
                 if 'already exists' in str(e):
@@ -84,26 +87,40 @@ class PostgresClient:
                 elif on_conflict == 'ignore':
                     stmt = stmt.on_conflict_do_nothing(index_elements=['id'])
 
-                with self.engine.begin() as conn:
-                    conn.execute(stmt, records)
+                conn.execute(stmt, records)
+            # Add indexes for GAME_ID, SEASON, SEASON_TYPE if present
             print(f"Table '{table_name}' written from DataFrame with on_conflict='{on_conflict}'.")
-
-    def create_table_from_dataframe(self, table_name: str, df, if_exists='append', index=True):
+            
+    def add_standard_indexes(self, table_name, df):
         """
-        Create a table from a pandas DataFrame using this PostgresClient.
-        if_exists: {'fail', 'replace', 'append'}
-        index: whether to write row indices as a column
+        Add indexes for GAME_ID, SEASON, SEASON_TYPE columns if present in the DataFrame or table.
+        Ensures these columns are always indexed, even if not present in the current DataFrame.
+        Uses column names from db_constants.Columns.
         """
+        
+        # Use constants for column names
+        index_col_names = [Columns.GAME_ID, Columns.SEASON, Columns.SEASON_TYPE]
+        index_cols = set()
+        for col in index_col_names:
+            if col in df.columns:
+                index_cols.add(col)
+        # Also check table columns in case df doesn't have all columns (e.g., partial writes)
         try:
-            df.to_sql(table_name, self.engine, if_exists=if_exists, index=index)
-            print(f"Table '{table_name}' created from DataFrame.")
-        except ValueError as e:
-            if 'already exists' in str(e):
-                print(f"Table '{table_name}' already exists.")
-            else:
-                raise
-        except (ProgrammingError, OperationalError) as e:
-            print(f"Database error: {e}")
+            metadata = MetaData()
+            table = Table(table_name, metadata, autoload_with=self.engine)
+            for col in index_col_names:
+                if col in table.columns:
+                    index_cols.add(col)
+        except Exception as e:
+            print(f"Could not reflect table {table_name} for index creation: {e}")
+        with self.engine.begin() as conn:
+            for col in index_cols:
+                try:
+                    idx_name = f"idx_{table_name}_{col.lower()}"
+                    conn.execute(text(f'CREATE INDEX IF NOT EXISTS {idx_name} ON {table_name} ("{col}");'))
+                    print(f"Index created for {col} on {table_name}.")
+                except Exception as e:
+                    print(f"Could not create index for {col} on {table_name}: {e}")
 
     def set_primary_key_id(self, table_name):
         """

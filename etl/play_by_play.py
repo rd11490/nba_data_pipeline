@@ -62,7 +62,6 @@ def get_existing_play_by_play_game_ids(seasons, season_type):
     return set()
 
 
-
 def main():
     parser = argparse.ArgumentParser(description='Pull NBA team game logs for given seasons and season type.')
     season_arg(parser)
@@ -74,7 +73,7 @@ def main():
     # Argument validation: must provide only one mode
     has_game_id = args.game_id is not None
     has_season_and_type = args.season is not None and args.season_type is not None
-    delta_run = getattr(args, 'delta', False) 
+    delta_run = args.delta
 
     if has_game_id and has_season_and_type:
         raise Exception("You must provide either --game_id or both --season and --season_type, but not both.")
